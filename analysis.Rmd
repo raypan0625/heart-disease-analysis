@@ -1,0 +1,336 @@
+---
+title: "Heart Disease"
+author: "Ray Pan (yulinp3@illinois.edu)"
+date: "4/29/2021"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: default
+    toc: yes
+---
+
+```{r, setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.align = 'center')
+library(readr)
+library(caret)
+library(rpart)
+library(knitr)
+library(randomForest)
+library(ggplot2)
+library(e1071)
+library(rpart.plot)
+```
+
+```{r, load-packages, include = FALSE}
+# load packages
+```
+
+```{r read-full-data, warning = FALSE, message = FALSE}
+# read full data
+hd = readr::read_csv("data/hd.csv")
+```
+
+***
+
+# Abstract
+
+An analysis of the heart disease data would find the best model that could help people quickly find out if they have heart disease. I trained three different machine learning algorithms to predict heart disease and have them compared. As a result, the logistic model is the most accurate when simply determine if they have the disease, and the Random Forest model is slightly better when trying to find out the number of narrowed vessels. People should use the results from the models as a reference but not a final medical decision as there's a chance of false prediction.
+
+***
+
+# Introduction
+
+Heart disease has become one of the most concerning and common causes of death in recent years. This analysis aims to find a better model that predicts the existence of heart disease in a patient by using several machine learning models. In this way, a patient would be able to find out his or her situation earlier and hopefully get an early cure out of it.
+
+***
+
+# Methods
+
+## Data
+
+I first clean up the data by creating dataset without columns containing more than 33% NAs.
+```{r, echo=TRUE}
+na_prop = function(x) {
+  mean(is.na(x))
+}
+
+# check proportion of NAs in each column 
+sapply(hd, na_prop)
+
+# create dataset without columns containing more than 33% NAs 
+hd = na.omit(hd[, !sapply(hd, na_prop) > 0.33])
+```
+
+In logistic regression, y value must be either 1 or 0, a new variable "num_log" is added to the dataset by treating v0 as no disease(0) and other values as having heart disease(1).
+```{r,echo=TRUE}
+hd['num_log']<-NA
+hd$num=factor(hd$num)
+hd$num_log[hd$num == 'v1'|hd$num == 'v2'|hd$num == 'v3'|hd$num == 'v4'] <- 1
+hd$num_log[hd$num == 'v0'] <- 0
+```
+
+## Modeling
+
+I first do a test-train split Training (70%) and Testing (30%)
+```{r echo=TRUE}
+set.seed(100)
+# test-train split
+hd_trn_idx = sample(nrow(hd), size = 0.7 * nrow(hd))
+hd_trn = hd[hd_trn_idx, ]
+hd_tst = hd[-hd_trn_idx, ]
+```
+
+### Logistic
+
+Fit a logistic regression and find out the accuracy.
+```{r, echo=TRUE}
+#logistic
+fit_log<-glm(num_log~.-num, data=hd_trn, family="binomial")
+fit_log_prob<-predict(fit_log, hd_tst, type='response')
+```
+
+I select 0.5 as the cutoff for the positive class to distinguish True Positives, False Positives, False Negatives, True Negatives. The accuracy and no information rate of the model are printed below.
+```{r, echo = FALSE}
+pred = factor(ifelse(fit_log_prob>0.5, "1", "0"))
+#true positive
+tp = sum(hd_tst$num_log == "1" & pred == "1")
+#false positive
+fp = sum(hd_tst$num_log == "0"  & pred == "1")
+#false negative
+fn = sum(hd_tst$num_log == "1"& pred == "0")
+#true negative
+tn = sum(hd_tst$num_log == "0"  & pred == "0")
+acc = (tp + tn) / (tp + fp + tn + fn)
+#No information rate
+pos = tp + fn
+neg = tn + fp
+prev = pos / (pos + neg)
+nir = max(c(prev, 1 - prev))
+paste("Accuracy", acc, sep = ":")
+paste("No Information Rate", nir, sep = ":")
+```
+We can see that the classifier achieves an accuracy above the no information rate.
+
+We then find the cross-validated accuracy for the logistic regression.
+```{r}
+set.seed(100)
+index_fold = caret::createFolds(hd_trn$num, k = 5)
+
+calc_rmse_logistic_single_fold = function(idx) {
+  
+  # Split within fold
+  est = hd_trn[-idx, ]
+  val = hd_trn[idx, ]
+  
+  # Fit model
+  glm_mod=glm(num_log~.-num, data=est, family="binomial")
+
+  # Making predictions
+  pred = factor(ifelse(predict(glm_mod, val)>0.49, "1", "0"))
+  
+  # Calculating metric (RMSE)
+   1-mean(val$num_log != pred)
+}
+
+fold_rmse = sapply(index_fold, calc_rmse_logistic_single_fold)
+#The cross-validated accuracy.
+cv_log=mean(fold_rmse)
+paste("Cross-validated accuracy", cv_log, sep = ":")
+```
+Which is still acceptable after avoiding overfitting.
+
+```{r}
+#Confusion Matrix for logistic model
+log_conf <- confusionMatrix(pred, factor(hd_tst$num_log))
+```
+
+A logistic model is somewhat good for a patient to quickly see whether he or she has the disease. However, it does not reflect on how many major vessels are narrowing as it assumes a patient with at least 1 major vessel with greater than 50% diameter narrowing as having heart disease. 
+The next few models would hopefully help determine to what level they have the disease. 
+
+### Decision Tree
+
+I first fit a decision tree model and find the accuracy.
+```{r}
+fit_rpart = rpart(num ~.-num_log, data = hd_trn)
+fit_rpart_prob<-predict(fit_rpart, hd_tst, type='class')
+tv0 = sum(hd_tst$num == "v0" & fit_rpart_prob == "v0")
+tv1 = sum(hd_tst$num == "v1" & fit_rpart_prob == "v1")
+tv2 = sum(hd_tst$num == "v2" & fit_rpart_prob == "v2")
+tv3 = sum(hd_tst$num == "v3" & fit_rpart_prob == "v3")
+tv4 = sum(hd_tst$num == "v4" & fit_rpart_prob == "v4")
+acc_tree=(tv0+tv1+tv2+tv3+tv4)/length(hd_tst$num)
+paste("Accuracy", acc_tree, sep = ":")
+```
+
+I then find the cross-validated accuracy for the Decision Tree model.
+```{r}
+set.seed(100)
+index_fold = caret::createFolds(hd_trn$num, k = 5)
+
+calc_rmse_rpart_single_fold = function(idx, cp, minsplit) {
+  
+  # Split within fold
+  est = hd_trn[-idx, ]
+  val = hd_trn[idx, ]
+  
+  # Fit model
+  rpart_mod = rpart(num ~.-num_log, data = est, cp=cp, minsplit=minsplit)
+
+  # Making predictions
+  pred = predict(rpart_mod, val, type='class')
+  
+  # Calculating metric (RMSE)
+   1-mean(val$num != pred)
+}
+
+fold_rmse = sapply(index_fold, calc_rmse_rpart_single_fold, cp=0.01, minsplit=5)
+#The cross-validated accuracy.
+cv_tree=mean(fold_rmse)
+paste("Cross-validated accuracy", cv_tree, sep = ":")
+```
+
+
+```{r, echo=FALSE}
+rpart.plot(fit_rpart)
+```
+With the help of plot, we could see that some important variables include exang, location, thalach, oldpeak, and chol.
+
+
+```{r}
+#Confusion Matrix for decision tree model
+tree_pred <- predict(fit_rpart, hd_tst, type='class')
+tree_conf <- confusionMatrix(tree_pred, factor(hd_tst$num))
+```
+It doesn't look very convincing, I would try another model.
+
+### Random Forest
+
+The Random Forest model is used here. It combines multiple methods and would hopefully produce a better model.
+The accuracy and cross-validated accuracy of this model is shown below.
+```{r}
+set.seed(42)
+hd_trn$num=factor(hd_trn$num)
+fit_forest<-randomForest(num~.-num_log, data=hd_trn, ntree=2000)
+acc_forest=mean(predict(fit_forest,hd_tst) == hd_tst$num)
+paste("Accuracy", acc_forest, sep = ":")
+
+index_fold = caret::createFolds(hd_trn$num, k = 5)
+
+calc_rmse_forest_single_fold = function(idx, ntree) {
+  
+  # Split within fold
+  est = hd_trn[-idx, ]
+  val = hd_trn[idx, ]
+  
+  # Fit model
+  forest_mod = randomForest(num~.-num_log, data=est,ntree=ntree)
+
+  # Making predictions
+  pred = predict(forest_mod, val, type='class')
+  
+  # Calculating metric (RMSE)
+   1-mean(val$num != pred)
+}
+
+fold_rmse = sapply(index_fold, calc_rmse_forest_single_fold, ntree=2000)
+#The cross-validated accuracy.
+cv_forest=mean(fold_rmse)
+paste("Cross-validated accuracy", cv_forest, sep = ":")
+```
+We could see the results are only slightly better than the previous model. 
+
+
+```{r}
+#Confusion Matrix for random forest model 
+forest_pred <- predict(fit_forest, hd_tst)
+forest_conf <- confusionMatrix(forest_pred, factor(hd_tst$num))
+```
+
+***
+
+# Results
+
+```{r}
+data=data.frame(
+  c(acc, cv_log),
+  c(acc_tree, cv_tree),
+  c(acc_forest,cv_forest))
+rownames(data)=c("Accuracy", "Cross-Validated accuracy")
+colnames(data)=c("Logistic", "Decision Tree", "Random Forest")
+kable(data)
+```
+If someone simply wants to determine whether a patient has the possibility of having heart disease, the log model would be better since we have an accuracy of 0.8378 with a sensitivity of 0.8696 and a specificity of 0.8231. While the models are good for predicting the T/F question, they might not work as expected when it is used to determine the number of narrowed major vessels. 
+If someone wants to predict the exact number of narrowed vessels, both the decision tree and random forest models could work, but they might not be as accurate as someone needs it to be, as the slightly better model only have an accuracy of 0.59.
+
+
+***
+
+# Discussion
+
+While accuracy of 0.8378 is acceptable for a model, it's not as good for medical purposes. A patient should only use this model as a reference or self-check. If a severe condition occurred, the patient should directly refer to the doctor's opinion. This model is typically useful for patients who are not very concerned about their situation and would just like a quick check to save time by only providing information on important variables such as exang, location, thalach, oldpeak, and chol.
+
+
+***
+
+# Appendix
+
+## Data Dictionary
+
+* age - Age in years
+
+* sex - Sex (1 = male; 0 = female)
+
+* cp - Chest pain type (1 = typical angina; 2 = atypical angina; 3 = non-anginal pain; 4 = asymptomatic)
+
+* trestbps - Resting blood pressure (in mm Hg on admission to the hospital)
+
+* chol - Serum cholesterol in mg/dl
+
+* fbs - Fasting blood sugar level > 120 mg/dl (1 = true; 0 = false)
+
+* restecg - Resting electrocardiographic results (0 = normal; 1 = having ST-T wave abnormality: T wave inversions and/or ST elevation or depression of > 0.05 mV; 2 = showing probable or definite left ventricular hypertrophy by Estes' criteria)
+
+* thalach - Maximum heart rate achieved
+
+* exang - Exercise induced angina (1 = yes; 0 = no)
+
+* oldpeak - ST depression induced by exercise relative to rest
+
+* num - Angiographic disease status
+
+  - `v0`: 0 major vessels with greater than 50% diameter narrowing. No presence of heart disease.
+  - `v1`: 1 major vessels with greater than 50% diameter narrowing.
+  - `v2`: 2 major vessels with greater than 50% diameter narrowing. 
+  - `v3`: 3 major vessels with greater than 50% diameter narrowing.
+  - `v4`: 4 major vessels with greater than 50% diameter narrowing.
+
+* location - location(cl = Cleveland, hu = Hungarian, ch = Switzerland, va = Virginia)
+
+* num_log - disease status(1 = have disease, 0 = no disease)
+
+## Logistic Regression Confusion Matrix
+```{r, echo=FALSE}
+log_conf
+```
+## Decision Tree Confusion Matrix
+```{r, echo=FALSE}
+tree_conf
+```
+## Random Forest Confusion Matrix
+```{r, echo=FALSE}
+forest_conf
+```
+
+## Other plots
+```{r}
+barplot(table(hd$num_log))
+boxplot(hd$age~hd$num, xlab="level of heart disease", ylab='age')
+```
+
+
+
+
+
+
+
